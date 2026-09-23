@@ -13,8 +13,9 @@
 @property (nonatomic, readonly) NSDictionary* environment;
 @property (nonatomic, readonly) NSString* workingDirectory;
 
-+ (instancetype)proxyWithOptions:(NSDictionary*)options;
-- (instancetype)initWithOptions:(NSDictionary*)options;
+// The file descriptors (stdin, stdout, stderr) and the connection to the client are owned by the proxy. They are
+// closed when the proxy is released, which lets the client (tm_dialog2) exit.
+- (instancetype)initWithOptions:(NSDictionary*)options fileDescriptors:(std::vector<int> const&)fds connection:(int)connection;
 
 - (void)writeStringToOutput:(NSString*)aString;
 - (void)writeStringToError:(NSString*)aString;

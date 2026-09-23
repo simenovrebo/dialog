@@ -12,27 +12,33 @@
 {
 	NSArray* _arguments;
 	NSDictionary* _parameters;
+	int _connection;
 }
 @end
 
 @implementation CLIProxy
-+ (instancetype)proxyWithOptions:(NSDictionary*)options;
-{
-	return [[CLIProxy alloc] initWithOptions:options];
-}
-
-- (instancetype)initWithOptions:(NSDictionary*)options
+- (instancetype)initWithOptions:(NSDictionary*)options fileDescriptors:(std::vector<int> const&)fds connection:(int)connection
 {
 	if(self = [super init])
 	{
-		_inputHandle      = [NSFileHandle fileHandleForReadingAtPath:[options objectForKey:@"stdin"]];
-		_outputHandle     = [NSFileHandle fileHandleForWritingAtPath:[options objectForKey:@"stdout"]];
-		_errorHandle      = [NSFileHandle fileHandleForWritingAtPath:[options objectForKey:@"stderr"]];
+		_connection       = connection;
+		_inputHandle      = [[NSFileHandle alloc] initWithFileDescriptor:fds[0] closeOnDealloc:YES];
+		_outputHandle     = [[NSFileHandle alloc] initWithFileDescriptor:fds[1] closeOnDealloc:YES];
+		_errorHandle      = [[NSFileHandle alloc] initWithFileDescriptor:fds[2] closeOnDealloc:YES];
 		_arguments        = [options objectForKey:@"arguments"];
 		_environment      = [options objectForKey:@"environment"];
 		_workingDirectory = [options objectForKey:@"cwd"];
 	}
 	return self;
+}
+
+- (void)dealloc
+{
+	[_inputHandle closeFile];
+	[_outputHandle closeFile];
+	[_errorHandle closeFile];
+	if(_connection != -1)
+		close(_connection);
 }
 
 - (NSDictionary*)parameters

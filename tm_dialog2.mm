@@ -4,42 +4,17 @@
 //
 
 #import "Dialog2.h"
+#import <oak/ipc.h>
 
 static double const AppVersion = 2.0;
 
-id connect ()
+static std::string socket_path ()
 {
-	NSString* portName = kDialogServerConnectionName;
-	if(char const* var = getenv("DIALOG_PORT_NAME"))
-		portName = @(var);
-
-	id proxy = [NSConnection rootProxyForConnectionWithRegisteredName:portName host:nil];
-	[proxy setProtocolForProxy:@protocol(DialogServerProtocol)];
-	return proxy;
-}
-
-char const* create_pipe (char const* name)
-{
-	char* filename;
-	asprintf(&filename, "%s/dialog_fifo_%d_%s", getenv("TMPDIR") ?: "/tmp", getpid(), name);
-	int res = mkfifo(filename, 0666);
-	if((res == -1) && (errno != EEXIST))
-	{
-		perror("Error creating the named pipe");
-		exit(EX_OSERR);
-   }
-	return filename;
-}
-
-int open_pipe (char const* name, int oflag)
-{
-	int fd = open(name, oflag);
-	if(fd == -1)
-	{
-		perror("Error opening the named pipe");
-		exit(EX_IOERR);
-	}
-	return fd;
+	if(char const* path = getenv("DIALOG_SOCKET"))
+		return path;
+	if(char const* pid = getenv("TM_PID"))
+		return oak::ipc::socket_path(kDialogServerSocketName, atoi(pid));
+	return "";
 }
 
 int main (int argc, char const* argv[])
@@ -55,94 +30,46 @@ int main (int argc, char const* argv[])
 	if(argc > 1 && *argv[1] == '-')
 		execv(getenv("DIALOG_1"), (char* const*)argv);
 
-	@autoreleasepool{
-		id<DialogServerProtocol> proxy = connect();
-		if(!proxy)
+	@autoreleasepool {
+		std::string const path = socket_path();
+		int fd = path.empty() ? -1 : oak::ipc::connect(path);
+		if(fd == -1)
 		{
 			fprintf(stderr, "error reaching server\n");
 			exit(EX_UNAVAILABLE);
 		}
 
-		char const* stdinName  = create_pipe("stdin");
-		char const* stdoutName = create_pipe("stdout");
-		char const* stderrName = create_pipe("stderr");
-
 		NSMutableArray* args = [NSMutableArray array];
 		for(size_t i = 0; i < argc; ++i)
 			[args addObject:@(argv[i])];
 
+		char* cwd = getcwd(NULL, 0);
 		NSDictionary* dict = @{
-			@"stdin":       @(stdinName),
-			@"stdout":      @(stdoutName),
-			@"stderr":      @(stderrName),
-			@"cwd":         @(getcwd(NULL, 0)),
+			@"cwd":         @(cwd ?: "/"),
 			@"environment": [[NSProcessInfo processInfo] environment],
 			@"arguments":   args,
 		};
+		free(cwd);
 
-		[proxy connectFromClientWithOptions:dict];
+		// The server reads and writes our stdin, stdout, and stderr directly. Input from a terminal is not read.
+		int input = isatty(STDIN_FILENO) ? open("/dev/null", O_RDONLY|O_CLOEXEC) : STDIN_FILENO;
 
-		int inputFd  = open_pipe(stdinName, O_WRONLY);
-		int outputFd = open_pipe(stdoutName, O_RDONLY);
-		int errorFd = open_pipe(stderrName, O_RDONLY);
-
-		std::map<int, int> fdMap;
-		fdMap[STDIN_FILENO] = inputFd;
-		fdMap[outputFd]     = STDOUT_FILENO;
-		fdMap[errorFd]      = STDERR_FILENO;
-
-		if(isatty(STDIN_FILENO) != 0)
+		NSData* data = [NSPropertyListSerialization dataWithPropertyList:dict format:NSPropertyListBinaryFormat_v1_0 options:0 error:nullptr];
+		if(!data || !oak::ipc::send_message(fd, std::string((char const*)data.bytes, data.length), { input, STDOUT_FILENO, STDERR_FILENO }))
 		{
-			fdMap.erase(fdMap.find(STDIN_FILENO));
-			close(inputFd);
+			fprintf(stderr, "error sending command to server\n");
+			exit(EX_UNAVAILABLE);
 		}
 
-		while(fdMap.size() > 1 || (fdMap.size() == 1 && fdMap.find(STDIN_FILENO) == fdMap.end()))
-		{
-			fd_set readfds, writefds;
-			FD_ZERO(&readfds); FD_ZERO(&writefds);
+		if(input != STDIN_FILENO)
+			close(input);
 
-			int fdCount = 0;
-			for(auto const& pair : fdMap)
-			{
-				FD_SET(pair.first, &readfds);
-				fdCount = std::max(fdCount, pair.first + 1);
-			}
-
-			int i = select(fdCount, &readfds, &writefds, NULL, NULL);
-			if(i == -1)
-			{
-				perror("Error from select");
-				continue;
-			}
-
-			std::vector<int> toRemove;
-			for(auto const& pair : fdMap)
-			{
-				if(FD_ISSET(pair.first, &readfds))
-				{
-					char buf[1024];
-					ssize_t len = read(pair.first, buf, sizeof(buf));
-
-					if(len == 0)
-							toRemove.push_back(pair.first); // we can’t remove as long as we need the iterator for the ++
-					else	write(pair.second, buf, len);
-				}
-			}
-
-			for(int key : toRemove)
-			{
-				if(fdMap[key] == inputFd)
-					close(inputFd);
-				fdMap.erase(key);
-			}
-		}
-
-		close(outputFd);
-		close(errorFd);
-		unlink(stdinName);
-		unlink(stdoutName);
-		unlink(stderrName);
+		// Wait for the server to close the connection when the command is done
+		char buf[64];
+		ssize_t len;
+		while((len = read(fd, buf, sizeof(buf))) > 0 || (len == -1 && errno == EINTR))
+			;
+		close(fd);
 	}
 
 	return EX_OK;
