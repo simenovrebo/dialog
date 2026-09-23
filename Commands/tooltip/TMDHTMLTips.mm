@@ -11,12 +11,16 @@
 "$DIALOG" tooltip --html '<h1>‘foobar’</h1>'
 */
 
-NSString* const TMDTooltipPreferencesIdentifier = @"TM Tooltip";
-
-@interface TMDHTMLTip () <WebFrameLoadDelegate>
+static NSString* CSSString (NSString* str)
 {
-	WebView*	webView;
-	WebPreferences* webPreferences;
+	str = [str stringByReplacingOccurrencesOfString:@"\\" withString:@"\\\\"];
+	str = [str stringByReplacingOccurrencesOfString:@"'" withString:@"\\'"];
+	return [NSString stringWithFormat:@"'%@'", str];
+}
+
+@interface TMDHTMLTip () <WKNavigationDelegate>
+{
+	WKWebView* webView;
 
 	NSDate* didOpenAtDate; // ignore mouse moves for the next second
 	NSPoint mousePositionWhenOpened;
@@ -45,41 +49,52 @@ NSString* const TMDTooltipPreferencesIdentifier = @"TM Tooltip";
 		[self setReleasedWhenClosed:YES];
 		[self setAlphaValue:0.97];
 		[self setOpaque:NO];
-		[self setBackgroundColor:[NSColor colorWithDeviceRed:1.0 green:0.96 blue:0.76 alpha:1.0]];
 		[self setBackgroundColor:[NSColor clearColor]];
 		[self setHasShadow:YES];
 		[self setLevel:NSStatusWindowLevel];
 		[self setHidesOnDeactivate:YES];
 		[self setIgnoresMouseEvents:YES];
 
-		webPreferences = [[WebPreferences alloc] initWithIdentifier:TMDTooltipPreferencesIdentifier];
-		[webPreferences setJavaScriptEnabled:YES];
-		[webPreferences setPlugInsEnabled:NO];
-		[webPreferences setUsesPageCache:NO];
-		[webPreferences setCacheModel:WebCacheModelDocumentViewer];
-		NSString* fontName = [NSUserDefaults.standardUserDefaults stringForKey:@"fontName"];
-		int fontSize = [NSUserDefaults.standardUserDefaults integerForKey:@"fontSize"] ?: 11;
-		NSFont* font = fontName ? [NSFont fontWithName:fontName size:fontSize] : [NSFont userFixedPitchFontOfSize:fontSize];
-		[webPreferences setStandardFontFamily:[font familyName]];
-		[webPreferences setDefaultFontSize:fontSize];
-		[webPreferences setDefaultFixedFontSize:fontSize];
+		WKWebViewConfiguration* configuration = [WKWebViewConfiguration new];
+		configuration.suppressesIncrementalRendering = YES;
 
-		webView = [[WebView alloc] initWithFrame:NSZeroRect];
-		[webView setPreferencesIdentifier:TMDTooltipPreferencesIdentifier];
+		webView = [[WKWebView alloc] initWithFrame:NSZeroRect configuration:configuration];
 		[webView setAutoresizingMask:NSViewWidthSizable | NSViewHeightSizable];
-		[webView setFrameLoadDelegate:self];
-		[webView setDrawsBackground:NO];
+		[webView setNavigationDelegate:self];
+		[webView setValue:@NO forKey:@"drawsBackground"];
 
 		[self setContentView:webView];
 	}
 	return self;
 }
 
+- (void)dealloc
+{
+	webView.navigationDelegate = nil;
+}
+
 // ===========
 // = Webview =
 // ===========
+- (NSRect)screenFrame
+{
+	// Find the screen which we are displaying on
+	NSPoint pos = NSMakePoint(NSMinX(self.frame), NSMaxY(self.frame));
+	for(NSScreen* candidate in [NSScreen screens])
+	{
+		if(NSPointInRect(pos, [candidate frame]))
+			return [candidate visibleFrame];
+	}
+	return [[NSScreen mainScreen] visibleFrame];
+}
+
 - (void)setContent:(NSString*)content transparent:(BOOL)transparent
 {
+	// Previously set via WebPreferences: the user’s font (as standard and fixed font) and font size
+	NSString* fontName = [NSUserDefaults.standardUserDefaults stringForKey:@"fontName"];
+	NSInteger fontSize = [NSUserDefaults.standardUserDefaults integerForKey:@"fontSize"] ?: 11;
+	NSFont* font = (fontName ? [NSFont fontWithName:fontName size:fontSize] : nil) ?: [NSFont userFixedPitchFontOfSize:fontSize];
+
 	NSString* fullContent =	@"<html>"
 				@"<head>"
 				@"  <style type='text/css' media='screen'>"
@@ -90,62 +105,68 @@ NSString* const TMDTooltipPreferencesIdentifier = @"TM Tooltip";
 				@"          overflow: hidden;"
 				@"          display: table-cell;"
 				@"          max-width: 800px;"
+				@"          font-family: %@, monospace;"
+				@"          font-size: %ldpx;"
 				@"      }"
+				@"      pre, code, kbd, samp, tt { font-family: %@, monospace; font-size: %ldpx; }"
 				@"      pre { white-space: pre-wrap; }"
 				@"  </style>"
 				@"</head>"
 				@"<body>%@</body>"
 				@"</html>";
 
-	fullContent = [NSString stringWithFormat:fullContent, transparent ? @"transparent" : @"#F6EDC3", content];
-	[[webView mainFrame] loadHTMLString:fullContent baseURL:nil];
+	NSString* family = CSSString(font.familyName ?: @"Menlo");
+	fullContent = [NSString stringWithFormat:fullContent, transparent ? @"transparent" : @"#F6EDC3", family, (long)fontSize, family, (long)fontSize, content ?: @""];
+
+	// The web view is given a large size so that the content is laid out as wide as allowed, then sized down to fit the content
+	NSRect screenFrame = [self screenFrame];
+	NSPoint topLeft = NSMakePoint(NSMinX(self.frame), NSMaxY(self.frame));
+	[self setContentSize:NSMakeSize(NSWidth(screenFrame) - NSWidth(screenFrame) / 3.0, NSHeight(screenFrame))];
+	[self setFrameTopLeftPoint:topLeft];
+
+	[webView loadHTMLString:fullContent baseURL:nil];
 }
 
-- (void)sizeToContent
+- (void)sizeToContentWithCompletionHandler:(void(^)())handler
 {
-	// Current tooltip position
-	NSPoint pos = NSMakePoint([self frame].origin.x, [self frame].origin.y + [self frame].size.height);
+	[webView evaluateJavaScript:@"(() => { const r = document.body.getBoundingClientRect(); return [r.right, r.bottom]; })()" completionHandler:^(id result, NSError* error){
+		NSArray* size = [result isKindOfClass:[NSArray class]] && [result count] == 2 ? result : @[ @100, @20 ];
+		double width  = ceil([size[0] doubleValue]);
+		double height = ceil([size[1] doubleValue]);
 
-	// Find the screen which we are displaying on
-	NSRect screenFrame = [[NSScreen mainScreen] visibleFrame];
-	for(NSScreen* candidate in [NSScreen screens])
-	{
-		if(NSPointInRect(pos, [candidate frame]))
-		{
-			screenFrame = [candidate visibleFrame];
-			break;
-		}
-	}
+		// Current tooltip position
+		NSPoint pos = NSMakePoint(NSMinX(self.frame), NSMaxY(self.frame));
+		NSRect screenFrame = [self screenFrame];
 
-	// The webview is set to a large initial size and then sized down to fit the content
-	[self setContentSize:NSMakeSize(screenFrame.size.width - screenFrame.size.width / 3.0, screenFrame.size.height)];
+		NSRect frame      = [self frameRectForContentRect:NSMakeRect(0, 0, width, height)];
+		frame.size.width  = std::min(NSWidth(frame), NSWidth(screenFrame));
+		frame.size.height = std::min(NSHeight(frame), NSHeight(screenFrame));
+		[self setFrame:frame display:NO];
 
-	double height = ceil([[[webView windowScriptObject] evaluateWebScript:@"document.body.getBoundingClientRect().bottom;"] doubleValue]);
-	double width  = ceil([[[webView windowScriptObject] evaluateWebScript:@"document.body.getBoundingClientRect().right;"] doubleValue]);
+		pos.x = std::max(NSMinX(screenFrame), std::min(pos.x, NSMaxX(screenFrame)-NSWidth(frame)));
+		pos.y = std::min(std::max(NSMinY(screenFrame)+NSHeight(frame), pos.y), NSMaxY(screenFrame));
 
-	[webView setFrameSize:NSMakeSize(width, height)];
-
-	NSRect frame      = [self frameRectForContentRect:[webView frame]];
-	frame.size.width  = std::min(NSWidth(frame), NSWidth(screenFrame));
-	frame.size.height = std::min(NSHeight(frame), NSHeight(screenFrame));
-	[self setFrame:frame display:NO];
-
-	pos.x = std::max(NSMinX(screenFrame), std::min(pos.x, NSMaxX(screenFrame)-NSWidth(frame)));
-	pos.y = std::min(std::max(NSMinY(screenFrame)+NSHeight(frame), pos.y), NSMaxY(screenFrame));
-
-	[self setFrameTopLeftPoint:pos];
+		[self setFrameTopLeftPoint:pos];
+		handler();
+	}];
 }
 
-- (void)delayedSizeAndShow:(id)sender
+- (void)webView:(WKWebView*)sender didFinishNavigation:(WKNavigation*)navigation
 {
-	[self sizeToContent];
-	[self orderFront:self];
-	[self runUntilUserActivity:self];
+	[self sizeToContentWithCompletionHandler:^{
+		[self orderFront:self];
+		[self performSelector:@selector(runUntilUserActivity:) withObject:self afterDelay:0];
+	}];
 }
 
-- (void)webView:(WebView*)sender didFinishLoadForFrame:(WebFrame*)frame;
+- (void)webView:(WKWebView*)sender didFailNavigation:(WKNavigation*)navigation withError:(NSError*)error
 {
-	[self performSelector:@selector(delayedSizeAndShow:) withObject:self afterDelay:0];
+	[self close];
+}
+
+- (void)webView:(WKWebView*)sender didFailProvisionalNavigation:(WKNavigation*)navigation withError:(NSError*)error
+{
+	[self close];
 }
 
 // ==================
@@ -215,6 +236,7 @@ NSString* const TMDTooltipPreferencesIdentifier = @"TM Tooltip";
 	[NSAnimationContext currentContext].duration = slowly ? 0.5 : 0.25;
 	[NSAnimationContext currentContext].completionHandler = ^{
 		[self orderOut:self];
+		[self close]; // releases the window (and its web view), see init
 	};
 
 	[self.animator setAlphaValue:0];
