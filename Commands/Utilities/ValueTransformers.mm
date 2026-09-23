@@ -75,8 +75,8 @@
 - (id)reverseTransformedValue:(id)value
 {
 	NSMutableArray* array = [NSMutableArray array];
-	NSUInteger buf[([value count])];
-	[(NSIndexSet*)value getIndexes:buf maxCount:[value count] inIndexRange:nil];
+	std::vector<NSUInteger> buf([value count]);
+	[(NSIndexSet*)value getIndexes:buf.data() maxCount:[value count] inIndexRange:nil];
 	for(NSUInteger i = 0; i != [value count]; i++)
 		[array addObject:[NSNumber numberWithUnsignedInteger:buf[i]]];
 	return array;
@@ -104,7 +104,10 @@ static NSString* NSStringFromColor (NSColor* aColor)
 	if(aColor == nil)
 		return nil;
 
-	aColor = [aColor colorUsingColorSpaceName:NSCalibratedRGBColorSpace];
+	aColor = [aColor colorUsingColorSpace:NSColorSpace.genericRGBColorSpace]; // calibrated RGB
+	if(aColor == nil) // e.g. a pattern color
+		return nil;
+
 	if([aColor alphaComponent] != 1.0)
 			return [NSString stringWithFormat:@"#%02lX%02lX%02lX%02lX", lroundf(255.0*[aColor redComponent]), lroundf(255.0*[aColor greenComponent]), lroundf(255.0*[aColor blueComponent]), lroundf(255.0*[aColor alphaComponent])];
 	else	return [NSString stringWithFormat:@"#%02lX%02lX%02lX", lroundf(255.0*[aColor redComponent]), lroundf(255.0*[aColor greenComponent]), lroundf(255.0*[aColor blueComponent])];
